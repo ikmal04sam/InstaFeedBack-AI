@@ -1,0 +1,12 @@
+{
+    "warnings": {"incompleteResults": false},
+    "matches": [
+        {
+            "message": "Capitalize the pronoun I.",
+            "offset": 0,
+            "length": 1,
+            "replacements": [{"value": "I"}],
+            "rule": {"id": "I_LOWERCASE", "issueType": "typographical"}
+        }
+    ]
+}

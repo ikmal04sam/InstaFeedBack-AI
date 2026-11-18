@@ -1,0 +1,11 @@
+{
+    "rubric": {
+        "language": {"score": 15, "feedback": "The writing communicates clearly but needs more varied vocabulary and sentence structures."},
+        "organisation": {"score": 14, "feedback": "Ideas follow a logical order, but paragraph development and transitions need improvement."}
+    },
+    "cefr": {"level": "B1", "explanation": "The essay connects familiar ideas clearly, but limited detail and language range suggest B1 writing."},
+    "vocabulary_feedback": ["Use more precise descriptions of the benefits of online learning."],
+    "structure_feedback": ["Develop the argument with a specific supporting example."],
+    "feedback": ["The central idea is clear but needs more supporting evidence."],
+    "suggestions": ["Add an example showing how flexible study benefits students."]
+}
