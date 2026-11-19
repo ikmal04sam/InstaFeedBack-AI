@@ -60,6 +60,8 @@ type EssayResult = {
         cefr?: {
             level: 'A1' | 'A2' | 'B1' | 'B2' | 'C1' | 'C2';
             explanation: string;
+            strength?: { quote: string; detail: string };
+            limitation?: { quote: string; detail: string; rewrite: string };
         };
         grammar: {
             source?: string;
@@ -247,6 +249,32 @@ function ResultPanel({ essay }: { essay: EssayResult | null }) {
                 <div className="bg-background mt-5 rounded-lg border p-4">
                     <h3 className="font-semibold">CEFR writing assessment</h3>
                     <p className="text-muted-foreground mt-2 text-sm leading-6">{essay.analysis.cefr.explanation}</p>
+                    {(essay.analysis.cefr.strength || essay.analysis.cefr.limitation) && (
+                        <dl className="mt-3 space-y-3 text-sm leading-6">
+                            {essay.analysis.cefr.strength && (
+                                <div>
+                                    <dt className="font-medium">What works</dt>
+                                    <dd className="text-muted-foreground break-words">
+                                        <q>{essay.analysis.cefr.strength.quote}</q> {essay.analysis.cefr.strength.detail}
+                                    </dd>
+                                </div>
+                            )}
+                            {essay.analysis.cefr.limitation && (
+                                <>
+                                    <div>
+                                        <dt className="font-medium">What to improve</dt>
+                                        <dd className="text-muted-foreground break-words">
+                                            <q>{essay.analysis.cefr.limitation.quote}</q> {essay.analysis.cefr.limitation.detail}
+                                        </dd>
+                                    </div>
+                                    <div>
+                                        <dt className="font-medium">Suggested rewrite</dt>
+                                        <dd className="text-muted-foreground break-words">{essay.analysis.cefr.limitation.rewrite}</dd>
+                                    </div>
+                                </>
+                            )}
+                        </dl>
+                    )}
                     <p className="text-muted-foreground mt-2 text-xs">AI estimate based on this essay, not an official CEFR certification.</p>
                 </div>
             )}

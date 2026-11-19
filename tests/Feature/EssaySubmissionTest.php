@@ -318,6 +318,47 @@ test('valid essays without grammar matches still receive CEFR feedback', functio
     expect(Essay::first()->analysis['cefr']['level'])->toBe('B1');
 });
 
+test('CEFR feedback only displays evidence grounded in the submitted essay', function (string $quote, string $rewrite, bool $showLimitation) {
+    $strength = [
+        'quote' => 'Although it’s small, the library gives students a quiet place to study.',
+        'detail' => 'The concession introduces a limitation before explaining the benefit.',
+    ];
+    $limitation = [
+        'quote' => $quote,
+        'detail' => 'The vague wording leaves the benefit unclear.',
+        'rewrite' => $rewrite,
+    ];
+    $cefr = [
+        'level' => 'B1',
+        'explanation' => str_pad('The essay connects its ideas clearly, although some wording lacks precision. A further point is', 600, ' still unfinished'),
+        'strength' => $strength,
+        'limitation' => $limitation,
+    ];
+    fakeRubricEvaluation(rubricAssessment(), ['cefr' => $cefr]);
+
+    $content = "Although it's small,\nthe library gives students a quiet place to study. It makes things better for students who cannot work at home.";
+    $this->actingAs(User::factory()->create())->post('/essays', ['content' => $content])->assertSessionHasNoErrors();
+    $essay = Essay::firstOrFail();
+
+    $expectedCefr = $cefr;
+    $expectedCefr['explanation'] = 'The essay connects its ideas clearly, although some wording lacks precision.';
+    $expectedCefr['strength']['quote'] = "Although it's small, the library gives students a quiet place to study.";
+    if (! $showLimitation) {
+        unset($expectedCefr['limitation']);
+    }
+    expect($essay->analysis['cefr'])->toBe($expectedCefr);
+
+    $this->get(route('dashboard', ['essay' => $essay->id]))->assertInertia(fn (Assert $page) => $page
+        ->where('selectedEssay.analysis.cefr', $expectedCefr));
+
+    Http::assertSent(fn (ClientRequest $request) => str_ends_with($request->url(), '/api/chat')
+        && $request['format']['properties']['cefr']['required'] === ['level', 'explanation', 'strength', 'limitation']);
+})->with([
+    'verified excerpt and rewrite' => ['It makes things better', 'It gives students somewhere to concentrate', true],
+    'invented excerpt' => ['It solves all their problems', 'It gives students somewhere to concentrate', false],
+    'unchanged rewrite' => ['It makes things better', 'It makes things better', false],
+]);
+
 test('invalid CEFR assessments are rejected', function (mixed $cefr) {
     $feedback = json_decode(file_get_contents(base_path('tests/Fixtures/ollama-feedback.json')), true);
     $feedback['cefr'] = $cefr;
