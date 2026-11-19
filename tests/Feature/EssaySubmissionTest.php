@@ -4,7 +4,9 @@ use App\Models\Essay;
 use App\Models\User;
 use App\Services\EssayRubric;
 use App\Services\LanguageToolGrammarChecker;
+use Illuminate\Http\Client\Request as ClientRequest;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Storage;
 use Inertia\Testing\AssertableInertia as Assert;
 
 beforeEach(function () {
@@ -34,6 +36,53 @@ function fakeRubricEvaluation(?array $rubric, array $extra = []): void
         ]),
     ]);
 }
+
+test('essay reviews receive ranked writing guidance and still work when retrieval is unavailable', function () {
+    Storage::fake('local');
+    config(['essay_retrieval.enabled' => true, 'essay_retrieval.model' => 'test-embedding-model']);
+    $guides = require resource_path('writing-guidance.php');
+    $vectors = array_map(fn (string $id) => match ($id) {
+        'support-and-explain' => [3, 0],
+        'paragraph-focus' => [1, 1],
+        'answer-the-task' => [1, 0],
+        default => [0, 1],
+    }, array_keys($guides));
+
+    $feedback = json_decode(file_get_contents(base_path('tests/Fixtures/ollama-feedback.json')), true);
+    Http::fake([
+        'http://127.0.0.1:8081/v2/check' => Http::response(['matches' => []]),
+        'http://127.0.0.1:11434/api/embed' => Http::sequence()
+            ->push(['embeddings' => $vectors])
+            ->push(['embeddings' => [[1, 0]]])
+            ->pushStatus(503),
+        'http://127.0.0.1:11434/api/chat' => Http::response([
+            'done' => true, 'message' => ['content' => json_encode($feedback)],
+        ]),
+    ]);
+
+    $this->artisan('essay:rag-index')->expectsOutput('Indexed '.count($guides).' writing guides.')->assertSuccessful();
+    $user = User::factory()->create();
+    $content = 'The school should keep its library open longer. This would help students in many ways.';
+
+    $this->actingAs($user)->post('/essays', ['content' => $content])->assertSessionHasNoErrors();
+    $this->post('/essays', ['content' => $content])->assertSessionHasNoErrors();
+
+    [$withGuidance, $fallback] = Essay::orderBy('id')->get()->all();
+    $expectedPassages = [
+        ['id' => 'support-and-explain', 'title' => $guides['support-and-explain']['title']],
+        ['id' => 'paragraph-focus', 'title' => $guides['paragraph-focus']['title']],
+    ];
+    expect($withGuidance->analysis['guidance_passages'])->toBe($expectedPassages)
+        ->and($fallback->analysis)->not->toHaveKey('guidance_passages')
+        ->and($fallback->score)->toBe($withGuidance->score);
+
+    $requests = Http::recorded(fn (ClientRequest $request) => str_ends_with($request->url(), '/api/chat'));
+    [$withGuidanceRequest, $fallbackRequest] = $requests->values()->all();
+    $prompt = json_decode($withGuidanceRequest[0]['messages'][1]['content'], true);
+    expect(array_column($prompt['writing_guidance'], 'id'))->toBe(array_column($expectedPassages, 'id'))
+        ->and($prompt['writing_guidance'][0]['text'])->toBe($guides['support-and-explain']['text'])
+        ->and(json_decode($fallbackRequest[0]['messages'][1]['content'], true))->not->toHaveKey('writing_guidance');
+});
 
 test('task essays receive three component marks out of sixty without another deduction', function (int $taskScore, int $language, int $organisation, int $total, string $band) {
     $rubric = rubricAssessment($taskScore);

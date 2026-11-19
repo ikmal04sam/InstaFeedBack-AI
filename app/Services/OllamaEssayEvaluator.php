@@ -9,7 +9,11 @@ use RuntimeException;
 
 class OllamaEssayEvaluator
 {
-    public function __construct(private LanguageToolGrammarChecker $grammarChecker, private EssayRubric $rubric) {}
+    public function __construct(
+        private LanguageToolGrammarChecker $grammarChecker,
+        private EssayRubric $rubric,
+        private EssayGuidanceRetriever $guidanceRetriever,
+    ) {}
 
     /** @return array<string, mixed> */
     public function analyze(string $essay, ?string $task = null): array
@@ -21,7 +25,7 @@ class OllamaEssayEvaluator
         $schema = $this->schema($hasTask);
 
         // Windows counts network waiting toward PHP's execution time limit.
-        set_time_limit($timeout + max(5, (int) config('services.languagetool.timeout', 30)) + 15);
+        set_time_limit($timeout + max(5, (int) config('services.languagetool.timeout', 30)) + max(1, (int) config('essay_retrieval.timeout')) + 15);
 
         $grammar = $this->grammarChecker->check($essay);
         $grammarEvidence = [
@@ -42,6 +46,12 @@ class OllamaEssayEvaluator
         if ($hasTask) {
             $submission['task'] = $task;
         }
+        $guidance = $this->guidanceRetriever->retrieve($essay, $task);
+        $instructions = $this->instructions().' '.$this->rubric->instructions($hasTask);
+        if ($guidance !== []) {
+            $submission['writing_guidance'] = $guidance;
+            $instructions .= ' Treat writing_guidance as optional reference data for revision suggestions. If a passage applies, identify the specific phrase or claim it can improve and show one brief revision or example tailored to the essay topic. Write the suggestion directly to the student. Present any new example as hypothetical. Skip passages that do not apply. Base rubric marks and the CEFR estimate on the original essay and the existing assessment instructions.';
+        }
 
         try {
             $response = Http::acceptJson()
@@ -53,7 +63,7 @@ class OllamaEssayEvaluator
                     'format' => $schema,
                     'options' => ['temperature' => 0, 'num_predict' => 1536, 'num_ctx' => 16384],
                     'messages' => [
-                        ['role' => 'system', 'content' => $this->instructions().' '.$this->rubric->instructions($hasTask).' Return only JSON matching this schema: '.json_encode($schema, JSON_THROW_ON_ERROR)],
+                        ['role' => 'system', 'content' => $instructions.' Return only JSON matching this schema: '.json_encode($schema, JSON_THROW_ON_ERROR)],
                         ['role' => 'user', 'content' => json_encode($submission, JSON_THROW_ON_ERROR)],
                     ],
                 ]);
@@ -115,6 +125,10 @@ class OllamaEssayEvaluator
             'analysis' => [
                 'source' => 'ollama',
                 'model' => $model,
+                ...($guidance === [] ? [] : ['guidance_passages' => array_map(fn (array $guide) => [
+                    'id' => $guide['id'],
+                    'title' => $guide['title'],
+                ], $guidance)]),
                 'rubric' => $grade['rubric'],
                 'grammar' => $grammar,
                 'cefr' => ['level' => $result['cefr']['level'], 'explanation' => $result['cefr']['explanation']],
