@@ -11,14 +11,17 @@ Artisan::command('inspire', function () {
 
 Artisan::command('essay:rag-index', function (EssayGuidanceRetriever $retriever): int {
     try {
-        $count = $retriever->rebuild();
+        $counts = $retriever->rebuild();
     } catch (JsonException|RuntimeException $exception) {
         $this->error($exception->getMessage());
 
         return Command::FAILURE;
     }
 
-    $this->info("Indexed {$count} writing guides.");
+    $this->info("Indexed {$counts['guides']} writing guides.");
+    if ($counts['references'] > 0) {
+        $this->info("Indexed {$counts['references']} annotated essay examples.");
+    }
 
     return Command::SUCCESS;
 })->purpose('Build the local index for essay revision guidance');

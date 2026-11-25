@@ -16,25 +16,34 @@ class EssayGuidanceRetriever
 
     private const MIN_SIMILARITY = 0.4;
 
-    public function rebuild(): int
+    public function __construct(private AnnotatedEssayReferences $annotatedReferences) {}
+
+    /** @return array{guides: int, references: int} */
+    public function rebuild(): array
     {
         $guides = $this->guides();
+        $references = $this->annotatedReferences->load();
         $model = (string) config('essay_retrieval.model');
-        $inputs = array_values(array_map(fn (array $guide) => 'search_document: '.$guide['title']."\n".$guide['text'], $guides));
-        $vectors = $this->embed($model, $inputs, max(60, $this->timeout()));
+        $vectors = [];
+        foreach (array_chunk($guides + $references, 24, true) as $batch) {
+            $inputs = array_values(array_map(fn (array $guide) => 'search_document: '.$guide['title']."\n".$guide['text'], $batch));
+            $embeddings = $this->embed($model, $inputs, max(60, $this->timeout()));
+            $vectors += array_combine(array_keys($batch), $embeddings);
+        }
         $path = Storage::disk('local')->path(self::INDEX_FILE);
 
         File::ensureDirectoryExists(dirname($path));
         File::replace($path, json_encode([
             'model' => $model,
             'corpus' => $this->corpusVersion($guides),
-            'vectors' => array_combine(array_keys($guides), $vectors),
+            'vectors' => $vectors,
+            'references' => $references,
         ], JSON_THROW_ON_ERROR));
 
-        return count($guides);
+        return ['guides' => count($guides), 'references' => count($references)];
     }
 
-    /** @return list<array{id: string, title: string, text: string}> */
+    /** @return list<array{id: string, title: string, text: string, reference?: array{essay_id: string, source_cefr: string, provisional_muet_band: string}}> */
     public function retrieve(string $essay, ?string $task): array
     {
         if (! config('essay_retrieval.enabled')) {
@@ -55,6 +64,12 @@ class EssayGuidanceRetriever
             if (($index['model'] ?? null) !== $model || ($index['corpus'] ?? null) !== $this->corpusVersion($guides)) {
                 throw new RuntimeException('The essay guidance index is outdated. Run php artisan essay:rag-index.');
             }
+            $references = filled(config('essay_retrieval.reference_path')) ? ($index['references'] ?? []) : [];
+            if (! is_array($references)) {
+                throw new RuntimeException('The essay guidance index contains invalid references. Run php artisan essay:rag-index.');
+            }
+            $passages = $guides + $references;
+            $fingerprint = $references === [] ? null : $this->annotatedReferences->fingerprint($essay);
 
             $excerpt = mb_substr($essay, 0, 1000);
             $remaining = mb_strlen($essay) - 1000;
@@ -65,8 +80,11 @@ class EssayGuidanceRetriever
             [$queryVector] = $this->embed($model, [$query], $this->timeout());
             $scores = [];
 
-            foreach ($guides as $id => $guide) {
+            foreach ($passages as $id => $guide) {
                 if ($task === null && ($guide['requires_task'] ?? false)) {
+                    continue;
+                }
+                if ($fingerprint !== null && ($guide['reference']['essay_fingerprint'] ?? null) === $fingerprint) {
                     continue;
                 }
 
@@ -86,11 +104,26 @@ class EssayGuidanceRetriever
 
             arsort($scores, SORT_NUMERIC);
 
-            return array_map(fn (string $id) => [
-                'id' => $id,
-                'title' => $guides[$id]['title'],
-                'text' => $guides[$id]['text'],
-            ], array_slice(array_keys($scores), 0, 3));
+            $results = [];
+            $addedReference = false;
+            foreach (array_keys($scores) as $id) {
+                $guide = $passages[$id];
+                if ($addedReference && isset($guide['reference'])) {
+                    continue;
+                }
+                $passage = ['id' => $id, 'title' => $guide['title'], 'text' => $guide['text']];
+                if (isset($guide['reference'])) {
+                    $passage['reference'] = $guide['reference'];
+                    unset($passage['reference']['essay_fingerprint']);
+                    $addedReference = true;
+                }
+                $results[] = $passage;
+                if (count($results) === 3) {
+                    break;
+                }
+            }
+
+            return $results;
         } catch (JsonException|RuntimeException $exception) {
             Log::warning('Essay guidance retrieval skipped.', ['reason' => $exception->getMessage()]);
 

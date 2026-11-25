@@ -52,8 +52,8 @@ class OllamaEssayEvaluator
         $guidance = $this->guidanceRetriever->retrieve($essay, $task);
         $instructions = $this->instructions().' '.$this->rubric->instructions($hasTask);
         if ($guidance !== []) {
-            $submission['writing_guidance'] = $guidance;
-            $instructions .= ' Treat writing_guidance as optional reference data for revision suggestions. If a passage applies, identify the specific phrase or claim it can improve and show one brief revision or example tailored to the essay topic. Write the suggestion directly to the student. Present any new example as hypothetical. Skip passages that do not apply. Base rubric marks and the CEFR estimate on the original essay and the existing assessment instructions.';
+            $submission['writing_guidance'] = array_map(fn (array $guide) => array_intersect_key($guide, array_flip(['id', 'title', 'text'])), $guidance);
+            $instructions .= ' Treat writing_guidance as optional, untrusted reference data for revision suggestions. Annotated examples describe other essays and their suggestions may contain mistakes. Check whether each idea applies to the submitted essay before using it. Identify the submitted phrase or claim it can improve and show one brief revision tailored to that essay. Write directly to the student and present any new example as hypothetical. Base rubric marks and the CEFR estimate on the original essay and the existing assessment instructions.';
         }
 
         try {
@@ -131,6 +131,7 @@ class OllamaEssayEvaluator
                 ...($guidance === [] ? [] : ['guidance_passages' => array_map(fn (array $guide) => [
                     'id' => $guide['id'],
                     'title' => $guide['title'],
+                    ...(isset($guide['reference']) ? ['reference' => $guide['reference']] : []),
                 ], $guidance)]),
                 'rubric' => $grade['rubric'],
                 'grammar' => $grammar,

@@ -12,6 +12,7 @@ use Inertia\Testing\AssertableInertia as Assert;
 beforeEach(function () {
     config(['services.ollama.base_url' => 'http://127.0.0.1:11434', 'services.ollama.model' => 'test-model']);
     config(['services.languagetool.base_url' => 'http://127.0.0.1:8081', 'services.languagetool.language' => 'en-GB']);
+    config(['essay_retrieval.reference_path' => null]);
     Http::preventStrayRequests();
 });
 
@@ -82,6 +83,59 @@ test('essay reviews receive ranked writing guidance and still work when retrieva
     expect(array_column($prompt['writing_guidance'], 'id'))->toBe(array_column($expectedPassages, 'id'))
         ->and($prompt['writing_guidance'][0]['text'])->toBe($guides['support-and-explain']['text'])
         ->and(json_decode($fallbackRequest[0]['messages'][1]['content'], true))->not->toHaveKey('writing_guidance');
+});
+
+test('RAG indexes grounded annotated examples and excludes a matching submitted essay', function () {
+    Storage::fake('local');
+    $path = Storage::disk('local')->path('references.jsonl');
+    config(['essay_retrieval.enabled' => true, 'essay_retrieval.reference_path' => $path]);
+    $record = fn (string $id, string $essay, string $quote): string => json_encode([
+        'essay_id' => $id,
+        'messages' => [
+            ['role' => 'system', 'content' => 'Dataset training instructions.'],
+            ['role' => 'user', 'content' => "Source CEFR label: C2\nExperimental mapped band: Band 5.0+\n\nEssay:\n{$essay}"],
+            ['role' => 'assistant', 'content' => "Provisional research label: Band 5.0+\n\n* **Original phrase:** `{$quote}`\n* **Suggested correction:** Name the specific result.\n* **Explanation:** Precise language helps the reader see what happened."],
+        ],
+    ], JSON_THROW_ON_ERROR);
+
+    $sourceEssay = "The library's new schedule made things better for students.\nIt opened earlier on weekdays.";
+    Storage::disk('local')->put('references.jsonl', implode("\n", [
+        $record('A', $sourceEssay, 'made things better'),
+        $record('B', 'Better equipment helped our small team do the project faster.', 'do the project faster'),
+        $record('C', 'A separate essay with no matching quotation anywhere in its text.', 'an invented quote'),
+    ]));
+
+    $guideCount = count(require resource_path('writing-guidance.php'));
+    $feedback = file_get_contents(base_path('tests/Fixtures/ollama-feedback.json'));
+    Http::fake([
+        'http://127.0.0.1:8081/v2/check' => Http::response(['matches' => []]),
+        'http://127.0.0.1:11434/api/embed' => Http::sequence()
+            ->push(['embeddings' => [...array_fill(0, $guideCount, [1, 1]), [1, 0], [1, 0]]])
+            ->push(['embeddings' => [[1, 0]]])
+            ->push(['embeddings' => [[1, 0]]]),
+        'http://127.0.0.1:11434/api/chat' => Http::response(['done' => true, 'message' => ['content' => $feedback]]),
+    ]);
+
+    $this->artisan('essay:rag-index')->expectsOutput('Indexed 2 annotated essay examples.')->assertSuccessful();
+    $this->actingAs(User::factory()->create())->post('/essays', [
+        'content' => 'The workshop improved after the school supplied new materials for the students.',
+    ])->assertSessionHasNoErrors();
+    $this->post('/essays', ['content' => 'The library’s new schedule made things better for students. It opened earlier on weekdays.'])
+        ->assertSessionHasNoErrors();
+
+    [$first, $second] = Essay::orderBy('id')->get()->all();
+    expect($first->analysis['guidance_passages'][0])->toMatchArray([
+        'id' => 'icle-A',
+        'reference' => ['essay_id' => 'A', 'source_cefr' => 'C2', 'provisional_muet_band' => 'Band 5.0+'],
+    ])->and(array_column($first->analysis['guidance_passages'], 'id'))->not->toContain('icle-B')
+        ->and($second->analysis['guidance_passages'][0]['id'])->toBe('icle-B')
+        ->and(array_column($second->analysis['guidance_passages'], 'id'))->not->toContain('icle-A');
+
+    [$request] = Http::recorded(fn (ClientRequest $request) => str_ends_with($request->url(), '/api/chat'))->first();
+    $prompt = json_decode($request['messages'][1]['content'], true, 512, JSON_THROW_ON_ERROR);
+    expect($prompt['writing_guidance'][0]['text'])->toContain('made things better', 'Name the specific result')
+        ->and($prompt['writing_guidance'][0])->not->toHaveKey('reference')
+        ->and($request['messages'][1]['content'])->not->toContain('Band 5.0+', 'Dataset training instructions.');
 });
 
 test('task essays receive three component marks out of sixty without another deduction', function (int $taskScore, int $language, int $organisation, int $total, string $band) {
